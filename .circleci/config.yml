@@ -2,6 +2,7 @@ version: 2.1
 orbs:
   codecov: codecov/codecov@3.2.2
   ucheck: udacity/ucheck@1
+  go: circleci/go@1.9
 
 executors:
   go:
@@ -20,9 +21,11 @@ jobs:
           name: Run linter
           command: make lint
   test:
-    executor: go
+    executor: vm
     steps:
       - checkout
+      - go/install:
+          version: "1.21.3"
       - run:
           name: Run tests
           command: make test
