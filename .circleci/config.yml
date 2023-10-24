@@ -2,11 +2,12 @@ version: 2.1
 orbs:
   codecov: codecov/codecov@3.2.2
   ucheck: udacity/ucheck@1
+  go: circleci/go@1.9
 
 executors:
   go:
     docker:
-      - image: cimg/go:1.18
+      - image: cimg/go:1.21
   vm:
     machine:
       image: ubuntu-2004:202111-02
@@ -23,6 +24,8 @@ jobs:
     executor: vm
     steps:
       - checkout
+      - go/install:
+          version: "1.21.3"
       - run:
           name: Run tests
           command: make test

@@ -3,8 +3,8 @@ package pgverify
 import (
 	"context"
 
-	"github.com/jackc/pgx/pgtype"
-	"github.com/jackc/pgx/v4"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"go.uber.org/multierr"
@@ -48,9 +48,7 @@ func (c Config) Verify(ctx context.Context, targets []*pgx.ConnConfig) (*Results
 			targetNames[i] = targets[i].Host
 		}
 
-		target.Logger = &pgxLogger{c.Logger.WithFields(pgxLoggerFields)}
-
-		target.LogLevel = pgx.LogLevelError
+		target.Tracer = NewTraceLogger(c.Logger.WithFields(pgxLoggerFields))
 
 		conn, err := pgx.ConnectConfig(ctx, target)
 		if err != nil {
@@ -89,7 +87,7 @@ func (c Config) Verify(ctx context.Context, targets []*pgx.ConnConfig) (*Results
 func (c Config) runTestsOnTarget(ctx context.Context, targetName string, conn *pgx.Conn, finalResults *Results, done chan struct{}) {
 	logger := c.Logger.WithField("target", targetName)
 
-	schemaTableHashes, err := c.fetchTargetTableNames(ctx, logger, conn)
+	schemaTableHashes, err := c.fetchTargetTableNames(ctx, conn)
 	if err != nil {
 		logger.WithError(err).Error("failed to fetch target tables")
 		close(done)
@@ -97,20 +95,14 @@ func (c Config) runTestsOnTarget(ctx context.Context, targetName string, conn *p
 		return
 	}
 
-	schemaTableHashes, err = c.runTestQueriesOnTarget(ctx, logger, conn, schemaTableHashes)
-	if err != nil {
-		logger.WithError(err).Error("failed to run verification tests")
-		close(done)
-
-		return
-	}
+	schemaTableHashes = c.runTestQueriesOnTarget(ctx, logger, conn, schemaTableHashes)
 
 	finalResults.AddResult(targetName, schemaTableHashes)
 	logger.Info("Table hashes computed")
 	close(done)
 }
 
-func (c Config) fetchTargetTableNames(ctx context.Context, logger *logrus.Entry, conn *pgx.Conn) (SingleResult, error) {
+func (c Config) fetchTargetTableNames(ctx context.Context, conn *pgx.Conn) (SingleResult, error) {
 	schemaTableHashes := make(SingleResult)
 
 	rows, err := conn.Query(ctx, buildGetTablesQuery(c.IncludeSchemas, c.ExcludeSchemas, c.IncludeTables, c.ExcludeTables))
@@ -158,7 +150,7 @@ func (c Config) validColumnTarget(columnName string) bool {
 	return false
 }
 
-func (c Config) runTestQueriesOnTarget(ctx context.Context, logger *logrus.Entry, conn *pgx.Conn, schemaTableHashes SingleResult) (SingleResult, error) {
+func (c Config) runTestQueriesOnTarget(ctx context.Context, logger *logrus.Entry, conn *pgx.Conn, schemaTableHashes SingleResult) SingleResult {
 	for schemaName, tables := range schemaTableHashes {
 		for tableName := range tables {
 			tableLogger := logger.WithField("table", tableName).WithField("schema", schemaName)
@@ -248,7 +240,7 @@ func (c Config) runTestQueriesOnTarget(ctx context.Context, logger *logrus.Entry
 		}
 	}
 
-	return schemaTableHashes, nil
+	return schemaTableHashes
 }
 
 func runTestOnTable(ctx context.Context, conn *pgx.Conn, query string) (string, error) {
