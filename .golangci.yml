@@ -10,6 +10,7 @@ linters:
     - scopelint # deprecated
     - structcheck # deprecated
     - varcheck # deprecated
+    - depguard
     - exhaustivestruct
     - exhaustruct
     - gochecknoglobals
