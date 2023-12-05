@@ -6,6 +6,7 @@ import (
 
 	"github.com/jackc/pgx/pgtype"
 	"github.com/jackc/pgx/v4"
+	"github.com/jackc/pgx/v4/pgxpool"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"go.uber.org/multierr"
@@ -13,14 +14,14 @@ import (
 
 // Verify runs all verification tests for the given table, configured by
 // the supplied Options.
-func Verify(ctx context.Context, targets []*pgx.ConnConfig, opts ...Option) (*Results, error) {
+func Verify(ctx context.Context, targets []*pgxpool.Config, opts ...Option) (*Results, error) {
 	c := NewConfig(opts...)
 
 	return c.Verify(ctx, targets)
 }
 
 // Verify runs all verification tests for the given table.
-func (c Config) Verify(ctx context.Context, targets []*pgx.ConnConfig) (*Results, error) {
+func (c Config) Verify(ctx context.Context, targets []*pgxpool.Config) (*Results, error) {
 	var finalResults *Results
 
 	if err := c.Validate(); err != nil {
@@ -31,33 +32,33 @@ func (c Config) Verify(ctx context.Context, targets []*pgx.ConnConfig) (*Results
 
 	// First check that we can connect to every specified target database.
 	targetNames := make([]string, len(targets))
-	conns := make(map[int]*pgx.Conn)
+	conns := make(map[int]*pgxpool.Pool)
 
 	for i, target := range targets {
 		pgxLoggerFields := logrus.Fields{
 			"component": "pgx",
-			"host":      targets[i].Host,
-			"port":      targets[i].Port,
-			"database":  targets[i].Database,
-			"user":      targets[i].User,
+			"host":      targets[i].ConnConfig.Host,
+			"port":      targets[i].ConnConfig.Port,
+			"database":  targets[i].ConnConfig.Database,
+			"user":      targets[i].ConnConfig.User,
 		}
 
 		if len(c.Aliases) == len(targets) {
 			targetNames[i] = c.Aliases[i]
 			pgxLoggerFields["alias"] = c.Aliases[i]
 		} else {
-			targetNames[i] = targets[i].Host
+			targetNames[i] = targets[i].ConnConfig.Host
 		}
 
-		target.Logger = &pgxLogger{c.Logger.WithFields(pgxLoggerFields)}
+		target.ConnConfig.Logger = &pgxLogger{c.Logger.WithFields(pgxLoggerFields)}
 
-		target.LogLevel = pgx.LogLevelError
+		target.ConnConfig.LogLevel = pgx.LogLevelError
 
-		conn, err := pgx.ConnectConfig(ctx, target)
+		conn, err := pgxpool.ConnectConfig(ctx, target)
 		if err != nil {
 			return finalResults, err
 		}
-		defer conn.Close(ctx)
+		defer conn.Close()
 		conns[i] = conn
 	}
 
@@ -86,7 +87,7 @@ func (c Config) Verify(ctx context.Context, targets []*pgx.ConnConfig) (*Results
 	return finalResults, nil
 }
 
-func (c Config) runTestsOnTarget(ctx context.Context, targetName string, conn *pgx.Conn, finalResults *Results, wg *sync.WaitGroup) {
+func (c Config) runTestsOnTarget(ctx context.Context, targetName string, conn *pgxpool.Pool, finalResults *Results, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	logger := c.Logger.WithField("target", targetName)
@@ -109,7 +110,7 @@ func (c Config) runTestsOnTarget(ctx context.Context, targetName string, conn *p
 	logger.Info("Table hashes computed")
 }
 
-func (c Config) fetchTargetTableNames(ctx context.Context, conn *pgx.Conn) (DatabaseResult, error) {
+func (c Config) fetchTargetTableNames(ctx context.Context, conn *pgxpool.Pool) (DatabaseResult, error) {
 	schemaTableHashes := make(DatabaseResult)
 
 	rows, err := conn.Query(ctx, buildGetTablesQuery(c.IncludeSchemas, c.ExcludeSchemas, c.IncludeTables, c.ExcludeTables))
@@ -157,7 +158,7 @@ func (c Config) validColumnTarget(columnName string) bool {
 	return false
 }
 
-func (c Config) runTestQueriesOnTable(ctx context.Context, logger *logrus.Entry, conn *pgx.Conn, targetName, schemaName, tableName string, finalResults *Results, wg *sync.WaitGroup) {
+func (c Config) runTestQueriesOnTable(ctx context.Context, logger *logrus.Entry, conn *pgxpool.Pool, targetName, schemaName, tableName string, finalResults *Results, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	tableLogger := logger.WithField("table", tableName).WithField("schema", schemaName)
@@ -240,7 +241,7 @@ func (c Config) runTestQueriesOnTable(ctx context.Context, logger *logrus.Entry,
 	}
 }
 
-func runTestOnTable(ctx context.Context, logger *logrus.Entry, conn *pgx.Conn, targetName, schemaName, tableName, testMode, query string, finalResults *Results, wg *sync.WaitGroup) {
+func runTestOnTable(ctx context.Context, logger *logrus.Entry, conn *pgxpool.Pool, targetName, schemaName, tableName, testMode, query string, finalResults *Results, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	row := conn.QueryRow(ctx, query)
