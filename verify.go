@@ -31,7 +31,7 @@ func (c Config) Verify(ctx context.Context, targets []*pgx.ConnConfig) (*Results
 
 	// First check that we can connect to every specified target database.
 	targetNames := make([]string, len(targets))
-	conns := make(map[int]*pgx.Conn)
+	connConfs := make(map[int]*pgx.ConnConfig)
 
 	for i, target := range targets {
 		pgxLoggerFields := logrus.Fields{
@@ -53,12 +53,7 @@ func (c Config) Verify(ctx context.Context, targets []*pgx.ConnConfig) (*Results
 
 		target.LogLevel = pgx.LogLevelError
 
-		conn, err := pgx.ConnectConfig(ctx, target)
-		if err != nil {
-			return finalResults, err
-		}
-		defer conn.Close(ctx)
-		conns[i] = conn
+		connConfs[i] = target
 	}
 
 	finalResults = NewResults(targetNames, c.TestModes)
@@ -66,10 +61,10 @@ func (c Config) Verify(ctx context.Context, targets []*pgx.ConnConfig) (*Results
 	// Then query each target database in parallel to generate table hashes.
 	wg := &sync.WaitGroup{}
 
-	for i, conn := range conns {
+	for i, connConf := range connConfs {
 		wg.Add(1)
 
-		go c.runTestsOnTarget(ctx, targetNames[i], conn, finalResults, wg)
+		go c.runTestsOnTarget(ctx, targetNames[i], connConf, finalResults, wg)
 	}
 
 	// Wait for queries to complete
@@ -86,10 +81,19 @@ func (c Config) Verify(ctx context.Context, targets []*pgx.ConnConfig) (*Results
 	return finalResults, nil
 }
 
-func (c Config) runTestsOnTarget(ctx context.Context, targetName string, conn *pgx.Conn, finalResults *Results, wg *sync.WaitGroup) {
+func (c Config) runTestsOnTarget(ctx context.Context, targetName string, connConf *pgx.ConnConfig, finalResults *Results, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	logger := c.Logger.WithField("target", targetName)
+
+	conn, err := pgx.ConnectConfig(ctx, connConf)
+	if err != nil {
+		logger.WithError(err).Error("failed to connect to target")
+
+		return
+	}
+
+	defer conn.Close(ctx)
 
 	schemaTableHashes, err := c.fetchTargetTableNames(ctx, conn)
 	if err != nil {
@@ -102,7 +106,7 @@ func (c Config) runTestsOnTarget(ctx context.Context, targetName string, conn *p
 		for tableName := range schemaHashes {
 			wg.Add(1)
 
-			go c.runTestQueriesOnTable(ctx, logger, conn, targetName, schemaName, tableName, finalResults, wg)
+			go c.runTestQueriesOnTable(ctx, logger, connConf, targetName, schemaName, tableName, finalResults, wg)
 		}
 	}
 
@@ -157,11 +161,20 @@ func (c Config) validColumnTarget(columnName string) bool {
 	return false
 }
 
-func (c Config) runTestQueriesOnTable(ctx context.Context, logger *logrus.Entry, conn *pgx.Conn, targetName, schemaName, tableName string, finalResults *Results, wg *sync.WaitGroup) {
+func (c Config) runTestQueriesOnTable(ctx context.Context, logger *logrus.Entry, connConf *pgx.ConnConfig, targetName, schemaName, tableName string, finalResults *Results, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	tableLogger := logger.WithField("table", tableName).WithField("schema", schemaName)
 	tableLogger.Info("Computing hash")
+
+	conn, err := pgx.ConnectConfig(ctx, connConf)
+	if err != nil {
+		logger.WithError(err).Error("failed to connect to target")
+
+		return
+	}
+
+	defer conn.Close(ctx)
 
 	rows, err := conn.Query(ctx, buildGetColumsQuery(schemaName, tableName))
 	if err != nil {
@@ -236,12 +249,21 @@ func (c Config) runTestQueriesOnTable(ctx context.Context, logger *logrus.Entry,
 
 		wg.Add(1)
 
-		go runTestOnTable(ctx, testLogger, conn, targetName, schemaName, tableName, testMode, query, finalResults, wg)
+		go runTestOnTable(ctx, testLogger, connConf, targetName, schemaName, tableName, testMode, query, finalResults, wg)
 	}
 }
 
-func runTestOnTable(ctx context.Context, logger *logrus.Entry, conn *pgx.Conn, targetName, schemaName, tableName, testMode, query string, finalResults *Results, wg *sync.WaitGroup) {
+func runTestOnTable(ctx context.Context, logger *logrus.Entry, connConf *pgx.ConnConfig, targetName, schemaName, tableName, testMode, query string, finalResults *Results, wg *sync.WaitGroup) {
 	defer wg.Done()
+
+	conn, err := pgx.ConnectConfig(ctx, connConf)
+	if err != nil {
+		logger.WithError(err).Error("failed to connect to target")
+
+		return
+	}
+
+	defer conn.Close(ctx)
 
 	row := conn.QueryRow(ctx, query)
 
