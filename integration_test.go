@@ -191,25 +191,27 @@ func TestVerifyData(t *testing.T) {
 	}
 
 	columnTypes := map[string][]string{
-		"boolean":   {"true", "false"},
-		"bytea":     {fmt.Sprintf("'%s'", hex.EncodeToString([]byte("convert this content to bytes")))},
-		"bit(1)":    {"'1'", "'0'"},
-		"varbit(3)": {"'0'", "'1'", "'101'", "'010'"},
+		"boolean":   {"true", "false", "NULL"},
+		"bytea":     {fmt.Sprintf("'%s'", hex.EncodeToString([]byte("convert this content to bytes"))), "NULL"},
+		"bit(1)":    {"'1'", "'0'", "NULL"},
+		"varbit(3)": {"'0'", "'1'", "'101'", "'010'", "NULL"},
 
-		"bigint[]":         {"'{602213950000000000, -1}'"},
-		"integer":          {"0", "123979", "-23974"},
-		"double precision": {"69.123987", "-69.123987"},
+		"bigint[]":         {"'{602213950000000000, -1}'", "NULL"},
+		"integer":          {"0", "123979", "-23974", "NULL"},
+		"double precision": {"69.123987", "-69.123987", "NULL"},
 
-		"text":                  {`'foo'`, `'bar'`, `''`, `'something that is much longer but without much other complication'`},
-		"uuid":                  {fmt.Sprintf("'%s'", uuid.New().String())},
-		`character varying(64)`: {`'more string stuff'`},
+		"text":                  {`'foo'`, `'bar'`, `''`, `'something that is much longer but without much other complication'`, `NULL`},
+		"text not null":         {`'foo'`, `'bar'`, `''`, `'something that is much longer but without much other complication'`},
+		"uuid":                  {fmt.Sprintf("'%s'", uuid.New().String()), fmt.Sprintf("'%s'", uuid.New().String()), "NULL"},
+		`character varying(64)`: {`'more string stuff'`, "NULL"},
 
-		"jsonb": {`'{}'`, `'{"foo": ["bar", "baz"]}'`, `'{"foo": "bar"}'`, `'{"foo": "bar", "baz": "qux"}'`, `'{"for sure?": true, "has numbers": 123.456, "this is": ["some", "json", "blob"]}'`},
-		"json":  {`'{}'`, `'{"foo": ["bar", "baz"]}'`, `'{"foo": "bar"}'`, `'{"foo": "bar", "baz": "qux"}'`, `'{"for sure?": true, "has numbers": 123.456, "this is": ["some", "json", "blob"]}'`},
+		"jsonb": {`'{}'`, `'{"foo": ["bar", "baz"]}'`, `'{"foo": "bar"}'`, `'{"foo": "bar", "baz": "qux"}'`, `'{"for sure?": true, "has numbers": 123.456, "this is": ["some", "json", "blob"]}'`, "NULL"},
+		"json":  {`'{}'`, `'{"foo": ["bar", "baz"]}'`, `'{"foo": "bar"}'`, `'{"foo": "bar", "baz": "qux"}'`, `'{"for sure?": true, "has numbers": 123.456, "this is": ["some", "json", "blob"]}'`, "NULL"},
 
-		"date":                        {`'2020-12-31'`},
-		"timestamp with time zone":    {`'2020-12-31 23:59:59 -8:00'`, `'2022-06-08 20:03:06.957223+00'`}, // hashes differently for psql/crdb, convert to epoch when hashing
-		"timestamp without time zone": {`'2020-12-31 23:59:59'`},
+		"date":                        {`'2020-12-31'`, "NULL"},
+		"date not null":               {`'2020-12-31'`},
+		"timestamp with time zone":    {`'2020-12-31 23:59:59 -8:00'`, `'2022-06-08 20:03:06.957223+00'`, "NULL"}, // hashes differently for psql/crdb, convert to epoch when hashing
+		"timestamp without time zone": {`'2020-12-31 23:59:59'`, "NULL"},
 	}
 	keys := make([]string, len(columnTypes))
 	keysWithTypes := make([]string, len(columnTypes))
