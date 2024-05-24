@@ -2,9 +2,11 @@ package pgverify
 
 import (
 	"context"
+	"sync"
 
 	"github.com/jackc/pgx/pgtype"
 	"github.com/jackc/pgx/v4"
+	"github.com/jackc/pgx/v4/pgxpool"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"go.uber.org/multierr"
@@ -12,14 +14,14 @@ import (
 
 // Verify runs all verification tests for the given table, configured by
 // the supplied Options.
-func Verify(ctx context.Context, targets []*pgx.ConnConfig, opts ...Option) (*Results, error) {
+func Verify(ctx context.Context, targets []*pgxpool.Config, opts ...Option) (*Results, error) {
 	c := NewConfig(opts...)
 
 	return c.Verify(ctx, targets)
 }
 
 // Verify runs all verification tests for the given table.
-func (c Config) Verify(ctx context.Context, targets []*pgx.ConnConfig) (*Results, error) {
+func (c Config) Verify(ctx context.Context, targets []*pgxpool.Config) (*Results, error) {
 	var finalResults *Results
 
 	if err := c.Validate(); err != nil {
@@ -30,50 +32,49 @@ func (c Config) Verify(ctx context.Context, targets []*pgx.ConnConfig) (*Results
 
 	// First check that we can connect to every specified target database.
 	targetNames := make([]string, len(targets))
-	conns := make(map[int]*pgx.Conn)
+	conns := make(map[int]*pgxpool.Pool)
 
 	for i, target := range targets {
 		pgxLoggerFields := logrus.Fields{
 			"component": "pgx",
-			"host":      targets[i].Host,
-			"port":      targets[i].Port,
-			"database":  targets[i].Database,
-			"user":      targets[i].User,
+			"host":      targets[i].ConnConfig.Host,
+			"port":      targets[i].ConnConfig.Port,
+			"database":  targets[i].ConnConfig.Database,
+			"user":      targets[i].ConnConfig.User,
 		}
 
 		if len(c.Aliases) == len(targets) {
 			targetNames[i] = c.Aliases[i]
 			pgxLoggerFields["alias"] = c.Aliases[i]
 		} else {
-			targetNames[i] = targets[i].Host
+			targetNames[i] = targets[i].ConnConfig.Host
 		}
 
-		target.Logger = &pgxLogger{c.Logger.WithFields(pgxLoggerFields)}
+		target.ConnConfig.Logger = &pgxLogger{c.Logger.WithFields(pgxLoggerFields)}
 
-		target.LogLevel = pgx.LogLevelError
+		target.ConnConfig.LogLevel = pgx.LogLevelError
 
-		conn, err := pgx.ConnectConfig(ctx, target)
+		conn, err := pgxpool.ConnectConfig(ctx, target)
 		if err != nil {
 			return finalResults, err
 		}
-		defer conn.Close(ctx)
+		defer conn.Close()
 		conns[i] = conn
 	}
 
 	finalResults = NewResults(targetNames, c.TestModes)
 
 	// Then query each target database in parallel to generate table hashes.
-	var doneChannels []chan struct{}
+	wg := &sync.WaitGroup{}
 
 	for i, conn := range conns {
-		done := make(chan struct{})
-		go c.runTestsOnTarget(ctx, targetNames[i], conn, finalResults, done)
-		doneChannels = append(doneChannels, done)
+		wg.Add(1)
+
+		go c.runTestsOnTarget(ctx, targetNames[i], conn, finalResults, wg)
 	}
 
-	for _, done := range doneChannels {
-		<-done
-	}
+	// Wait for queries to complete
+	wg.Wait()
 
 	// Compare final results
 	reportErrors := finalResults.CheckForErrors()
@@ -86,26 +87,31 @@ func (c Config) Verify(ctx context.Context, targets []*pgx.ConnConfig) (*Results
 	return finalResults, nil
 }
 
-func (c Config) runTestsOnTarget(ctx context.Context, targetName string, conn *pgx.Conn, finalResults *Results, done chan struct{}) {
+func (c Config) runTestsOnTarget(ctx context.Context, targetName string, conn *pgxpool.Pool, finalResults *Results, wg *sync.WaitGroup) {
+	defer wg.Done()
+
 	logger := c.Logger.WithField("target", targetName)
 
 	schemaTableHashes, err := c.fetchTargetTableNames(ctx, conn)
 	if err != nil {
 		logger.WithError(err).Error("failed to fetch target tables")
-		close(done)
 
 		return
 	}
 
-	schemaTableHashes = c.runTestQueriesOnTarget(ctx, logger, conn, schemaTableHashes)
+	for schemaName, schemaHashes := range schemaTableHashes {
+		for tableName := range schemaHashes {
+			wg.Add(1)
 
-	finalResults.AddResult(targetName, schemaTableHashes)
+			go c.runTestQueriesOnTable(ctx, logger, conn, targetName, schemaName, tableName, finalResults, wg)
+		}
+	}
+
 	logger.Info("Table hashes computed")
-	close(done)
 }
 
-func (c Config) fetchTargetTableNames(ctx context.Context, conn *pgx.Conn) (SingleResult, error) {
-	schemaTableHashes := make(SingleResult)
+func (c Config) fetchTargetTableNames(ctx context.Context, conn *pgxpool.Pool) (DatabaseResult, error) {
+	schemaTableHashes := make(DatabaseResult)
 
 	rows, err := conn.Query(ctx, buildGetTablesQuery(c.IncludeSchemas, c.ExcludeSchemas, c.IncludeTables, c.ExcludeTables))
 	if err != nil {
@@ -119,10 +125,10 @@ func (c Config) fetchTargetTableNames(ctx context.Context, conn *pgx.Conn) (Sing
 		}
 
 		if _, ok := schemaTableHashes[schema.String]; !ok {
-			schemaTableHashes[schema.String] = make(map[string]map[string]string)
+			schemaTableHashes[schema.String] = make(SchemaResult)
 		}
 
-		schemaTableHashes[schema.String][table.String] = make(map[string]string)
+		schemaTableHashes[schema.String][table.String] = make(TableResult)
 
 		for _, testMode := range c.TestModes {
 			schemaTableHashes[schema.String][table.String][testMode] = defaultErrorOutput
@@ -152,111 +158,115 @@ func (c Config) validColumnTarget(columnName string) bool {
 	return false
 }
 
-func (c Config) runTestQueriesOnTarget(ctx context.Context, logger *logrus.Entry, conn *pgx.Conn, schemaTableHashes SingleResult) SingleResult {
-	for schemaName, tables := range schemaTableHashes {
-		for tableName := range tables {
-			tableLogger := logger.WithField("table", tableName).WithField("schema", schemaName)
-			tableLogger.Info("Computing hash")
+func (c Config) runTestQueriesOnTable(ctx context.Context, logger *logrus.Entry, conn *pgxpool.Pool, targetName, schemaName, tableName string, finalResults *Results, wg *sync.WaitGroup) {
+	defer wg.Done()
 
-			rows, err := conn.Query(ctx, buildGetColumsQuery(schemaName, tableName))
-			if err != nil {
-				tableLogger.WithError(err).Error("Failed to query column names, data types")
+	tableLogger := logger.WithField("table", tableName).WithField("schema", schemaName)
+	tableLogger.Info("Computing hash")
 
-				continue
-			}
+	rows, err := conn.Query(ctx, buildGetColumsQuery(schemaName, tableName))
+	if err != nil {
+		tableLogger.WithError(err).Error("Failed to query column names, data types")
 
-			allTableColumns := make(map[string]column)
+		return
+	}
 
-			for rows.Next() {
-				var columnName, dataType, constraintName, constraintType pgtype.Text
+	allTableColumns := make(map[string]column)
 
-				err := rows.Scan(&columnName, &dataType, &constraintName, &constraintType)
-				if err != nil {
-					tableLogger.WithError(err).Error("Failed to parse column names, data types from query response")
+	for rows.Next() {
+		var columnName, dataType, constraintName, constraintType pgtype.Text
 
-					continue
-				}
+		err := rows.Scan(&columnName, &dataType, &constraintName, &constraintType)
+		if err != nil {
+			tableLogger.WithError(err).Error("Failed to parse column names, data types from query response")
 
-				existing, ok := allTableColumns[columnName.String]
-				if ok {
-					existing.constraints = append(existing.constraints, constraintType.String)
-					allTableColumns[columnName.String] = existing
-				} else {
-					allTableColumns[columnName.String] = column{columnName.String, dataType.String, []string{constraintType.String}}
-				}
-			}
+			continue
+		}
 
-			var tableColumns []column
-
-			var primaryKeyColumnNames []string
-
-			for _, col := range allTableColumns {
-				if col.IsPrimaryKey() {
-					primaryKeyColumnNames = append(primaryKeyColumnNames, col.name)
-				}
-
-				if c.validColumnTarget(col.name) {
-					tableColumns = append(tableColumns, col)
-				}
-			}
-
-			if len(primaryKeyColumnNames) == 0 {
-				tableLogger.Error("No primary keys found")
-
-				continue
-			}
-
-			tableLogger.WithFields(logrus.Fields{
-				"primary_keys": primaryKeyColumnNames,
-				"columns":      tableColumns,
-			}).Info("Determined columns to hash")
-
-			for _, testMode := range c.TestModes {
-				testLogger := tableLogger.WithField("test", testMode)
-
-				var query string
-
-				switch testMode {
-				case TestModeFull:
-					query = buildFullHashQuery(c, schemaName, tableName, tableColumns)
-				case TestModeBookend:
-					query = buildBookendHashQuery(c, schemaName, tableName, tableColumns, c.BookendLimit)
-				case TestModeSparse:
-					query = buildSparseHashQuery(c, schemaName, tableName, tableColumns, c.SparseMod)
-				case TestModeRowCount:
-					query = buildRowCountQuery(schemaName, tableName)
-				}
-
-				testLogger.Debugf("Generated query: %s", query)
-
-				testOutput, err := runTestOnTable(ctx, conn, query)
-				if err != nil {
-					testLogger.WithError(err).Error("Failed to compute hash")
-
-					continue
-				}
-
-				schemaTableHashes[schemaName][tableName][testMode] = testOutput
-				testLogger.Infof("Hash computed: %s", testOutput)
-			}
+		existing, ok := allTableColumns[columnName.String]
+		if ok {
+			existing.constraints = append(existing.constraints, constraintType.String)
+			allTableColumns[columnName.String] = existing
+		} else {
+			allTableColumns[columnName.String] = column{columnName.String, dataType.String, []string{constraintType.String}}
 		}
 	}
 
-	return schemaTableHashes
+	var tableColumns []column
+
+	var primaryKeyColumnNames []string
+
+	for _, col := range allTableColumns {
+		if col.IsPrimaryKey() {
+			primaryKeyColumnNames = append(primaryKeyColumnNames, col.name)
+		}
+
+		if c.validColumnTarget(col.name) {
+			tableColumns = append(tableColumns, col)
+		}
+	}
+
+	if len(primaryKeyColumnNames) == 0 {
+		tableLogger.Error("No primary keys found")
+
+		return
+	}
+
+	tableLogger.WithFields(logrus.Fields{
+		"primary_keys": primaryKeyColumnNames,
+		"columns":      tableColumns,
+	}).Info("Determined columns to hash")
+
+	for _, testMode := range c.TestModes {
+		testLogger := tableLogger.WithField("test", testMode)
+
+		var query string
+
+		switch testMode {
+		case TestModeFull:
+			query = buildFullHashQuery(c, schemaName, tableName, tableColumns)
+		case TestModeBookend:
+			query = buildBookendHashQuery(c, schemaName, tableName, tableColumns, c.BookendLimit)
+		case TestModeSparse:
+			query = buildSparseHashQuery(c, schemaName, tableName, tableColumns, c.SparseMod)
+		case TestModeRowCount:
+			query = buildRowCountQuery(schemaName, tableName)
+		}
+
+		testLogger.Debugf("Generated query: %s", query)
+
+		wg.Add(1)
+
+		go runTestOnTable(ctx, testLogger, conn, targetName, schemaName, tableName, testMode, query, finalResults, wg)
+	}
 }
 
-func runTestOnTable(ctx context.Context, conn *pgx.Conn, query string) (string, error) {
+func runTestOnTable(ctx context.Context, logger *logrus.Entry, conn *pgxpool.Pool, targetName, schemaName, tableName, testMode, query string, finalResults *Results, wg *sync.WaitGroup) {
+	defer wg.Done()
+
 	row := conn.QueryRow(ctx, query)
+
+	var testOutputString string
 
 	var testOutput pgtype.Text
 	if err := row.Scan(&testOutput); err != nil {
 		switch err {
 		case pgx.ErrNoRows:
-			return "no rows", nil
+			testOutputString = "no rows"
 		default:
-			return "", errors.Wrap(err, "failed to scan test output")
+			logger.WithError(err).Error("failed to scan test output")
+
+			return
 		}
+	} else {
+		testOutputString = testOutput.String
 	}
 
-	return testOutput.String, nil
+	logger.Infof("Hash computed: %s", testOutputString)
+
+	databaseResults := make(DatabaseResult)
+	databaseResults[schemaName] = make(SchemaResult)
+	databaseResults[schemaName][tableName] = make(TableResult)
+	databaseResults[schemaName][tableName][testMode] = testOutputString
+	finalResults.AddResult(targetName, databaseResults)
 }

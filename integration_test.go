@@ -15,7 +15,7 @@ import (
 
 	"github.com/cjfinnell/pgverify"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v4"
+	"github.com/jackc/pgx/v4/pgxpool"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -27,17 +27,17 @@ var (
 	dbName     = "test"
 )
 
-func waitForDBReady(t *testing.T, ctx context.Context, config *pgx.ConnConfig) bool {
+func waitForDBReady(t *testing.T, ctx context.Context, config *pgxpool.Config) bool {
 	t.Helper()
 
 	connected := false
 
 	for count := 0; count < 30; count++ {
-		conn, err := pgx.ConnectConfig(ctx, config)
+		conn, err := pgxpool.ConnectConfig(ctx, config)
 		if err == nil {
 			connected = true
 
-			conn.Close(ctx)
+			conn.Close()
 
 			break
 		}
@@ -259,7 +259,7 @@ func TestVerifyData(t *testing.T) {
 	}
 
 	// Act
-	var targets []*pgx.ConnConfig
+	var targets []*pgxpool.Config
 
 	var aliases []string
 
@@ -268,13 +268,13 @@ func TestVerifyData(t *testing.T) {
 		// Create db and connect
 		port, err := createContainer(t, ctx, db.image, db.port, db.env, db.cmd)
 		require.NoError(t, err)
-		config, err := pgx.ParseConfig(fmt.Sprintf("postgresql://%s@127.0.0.1:%d%s", db.userPassword, port, db.db))
+		config, err := pgxpool.ParseConfig(fmt.Sprintf("postgresql://%s@127.0.0.1:%d%s", db.userPassword, port, db.db))
 		require.NoError(t, err)
 		assert.True(t, waitForDBReady(t, ctx, config))
-		conn, err := pgx.ConnectConfig(ctx, config)
+		conn, err := pgxpool.ConnectConfig(ctx, config)
 		require.NoError(t, err)
 
-		defer conn.Close(ctx)
+		defer conn.Close()
 
 		// Create and populate tables
 		for _, tableName := range tableNames {

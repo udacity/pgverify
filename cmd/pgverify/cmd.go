@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/jackc/pgx/v4"
+	"github.com/jackc/pgx/v4/pgxpool"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 
@@ -49,9 +49,9 @@ var rootCmd = &cobra.Command{
 	Long: `Verify data consistency between PostgreSQL syntax compatible databases.`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		var targets []*pgx.ConnConfig
+		var targets []*pgxpool.Config
 		for _, target := range args {
-			connConfig, err := pgx.ParseConfig(target)
+			connConfig, err := pgxpool.ParseConfig(target)
 			if err != nil {
 				return fmt.Errorf("invalid target URI %s: %w", target, err)
 			}
