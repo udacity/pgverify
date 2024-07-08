@@ -202,12 +202,12 @@ func TestVerifyData(t *testing.T) {
 		"numeric":          {"0", "123.456", "-123.456"},
 		"decimal":          {"0", "123.456", "-123.456"},
 
-		"text":                  {`'foo'`, `'bar'`, `''`, `'something that is much longer but without much other complication'`},
+		"text":                  {`'foo'`, `'bar'`, `''`, `'something that is much longer but without much other complication'`, `'contains \b backspace character'`},
 		"uuid":                  {fmt.Sprintf("'%s'", uuid.New().String())},
-		`character varying(64)`: {`'more string stuff'`},
+		`character varying(64)`: {`'more string stuff'`, `'string with \b backspace character'`},
 
-		"jsonb": {`'{}'`, `'{"foo": ["bar", "baz"]}'`, `'{"foo": "bar"}'`, `'{"foo": "bar", "baz": "qux"}'`, `'{"for sure?": true, "has numbers": 123.456, "this is": ["some", "json", "blob"]}'`},
-		"json":  {`'{}'`, `'{"foo": ["bar", "baz"]}'`, `'{"foo": "bar"}'`, `'{"foo": "bar", "baz": "qux"}'`, `'{"for sure?": true, "has numbers": 123.456, "this is": ["some", "json", "blob"]}'`},
+		"jsonb": {`'{}'`, `'{"foo": ["bar", "baz"]}'`, `'{"foo": "bar with \b backspace"}'`, `'{"foo": "bar", "baz": "qux"}'`, `'{"for sure?": true, "has numbers": 123.456, "this is": ["some", "json", "blob"]}'`},
+		"json":  {`'{}'`, `'{"foo": ["bar", "baz"]}'`, `'{"foo": "bar with \b backspace"}'`, `'{"foo": "bar", "baz": "qux"}'`, `'{"for sure?": true, "has numbers": 123.456, "this is": ["some", "json", "blob"]}'`},
 
 		"date":                        {`'2020-12-31'`},
 		"timestamp with time zone":    {`'2020-12-31 23:59:59 -8:00'`, `'2022-06-08 20:03:06.957223+00'`}, // hashes differently for psql/crdb, convert to epoch when hashing
